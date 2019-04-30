@@ -1,5 +1,6 @@
 import numpy as np
 import random
+import math
 from tensorforce.environments import Environment
 
 from tensorforce.agents import *
@@ -18,7 +19,7 @@ class BandedPrinceAction(object):
         small = round(striped / 30.0) + 2
         big = round(striped / 70.0)
 
-        return small*2.5 + big*12.5 + 15.625
+        return 28*(small*2.5 + big*12.5 + 15.625)/29
 
 class EquineAction(object):
     def is_available(self, state):
@@ -33,7 +34,7 @@ class EquineAction(object):
         small = round(horseheads / 30.0) + 2
         big = round(horseheads / 70.0)
 
-        return small*2.5 + big*12.5 
+        return (small*2.5 + big*12.5)
 
 
 class HonoredAction(object):
@@ -66,7 +67,7 @@ class RandomAction(object):
             state.horseheads += self.magnitude
         else:
             state.striped += self.magnitude
-        return 0
+        return 0 - 1.4
 
 
 
@@ -86,32 +87,29 @@ class PortCarnelianAction(object):
     def is_available(self, state):
         return state.get_level() >= self.min_level and state.get_level() <= self.max_level  \
             and state.airs >= self.min_airs and state.airs <= self.max_airs \
-            and state.striped >= self.striped_req and state.horseheads >= self.horsehead_req
+            and state.striped >= self.striped_req and state.horseheads >= self.horsehead_req \
+            and state.legitimacy + self.legitimacy_change > 0
     
     def perform_action(self, state):
         state.progress_cp += 3
         state.legitimacy += self.legitimacy_change
         state.striped += self.striped_change
         state.horseheads += self.horsehead_change
-        return -self.echo_cost
-
+        return -self.echo_cost-1.4
 
 ACTIONS = [
       PortCarnelianAction(1, 11, 0, 100, striped_change=4)
     , PortCarnelianAction(1, 11, 0, 100, horsehead_change=4)
-
     , PortCarnelianAction(1, 10, 1, 10, striped_change=15, legitimacy_change=-10)
     , PortCarnelianAction(1, 10, 1, 10, striped_change=-10, legitimacy_change=5)
     , PortCarnelianAction(1, 10, 91, 100, horsehead_change=15, legitimacy_change=-10)
     , PortCarnelianAction(1, 10, 91, 100, horsehead_change=-10, legitimacy_change=5)
-
     , PortCarnelianAction(1, 6, 1, 40, striped_change=-20, horsehead_change=25, striped_req=20)
     , PortCarnelianAction(1, 6, 11, 50, striped_change=15, legitimacy_change=-10)
     , PortCarnelianAction(1, 6, 41, 50, legitimacy_change=10)
     , RandomAction(1, 6, 51, 70, 10)
     , PortCarnelianAction(1, 6, 51, 90, horsehead_change=15, legitimacy_change=-10)
     , PortCarnelianAction(1, 6, 71, 100, striped_change=25, horsehead_change=-20, horsehead_req=20)    
-
     , PortCarnelianAction(7, 10, 1, 30, horsehead_change=15, legitimacy_change=-10)
     # skipping a dangerous source
     , RandomAction(7, 10, 31, 40, 15)
@@ -120,13 +118,11 @@ ACTIONS = [
     , PortCarnelianAction(7, 10, 61, 70, legitimacy_change=10)
     , PortCarnelianAction(7, 10, 71, 90, horsehead_change=25, legitimacy_change=-20, horsehead_req=25)
     , PortCarnelianAction(7, 10, 71, 100, striped_change=25, horsehead_change=-20, horsehead_req=20)
-
     , PortCarnelianAction(11, 11, 1, 20, striped_change=12, echo_cost=2.5)
     , PortCarnelianAction(11, 11, 21, 40, horsehead_change=12, echo_cost=2.5)
     , PortCarnelianAction(11, 11, 41, 50, legitimacy_change=10)
     , PortCarnelianAction(11, 11, 0, 100, striped_change=-30, horsehead_change=38)
     , PortCarnelianAction(11, 11, 0, 100, striped_change=38, horsehead_change=-30)
-
     , HonoredAction()
     , BandedPrinceAction()
     , EquineAction()
@@ -167,7 +163,7 @@ class PortCarnelian(Environment):
         return self.out_state()
 
     def out_state(self):
-        return np.array([self._state.get_level(), self._state.legitimacy, self._state.striped, self._state.horseheads, self._state.airs])
+        return [self._state.get_level(), self._state.legitimacy, self._state.striped, self._state.horseheads, self._state.airs]
 
     def execute(self, action):
         reward = 0
@@ -217,45 +213,105 @@ class PortCarnelian(Environment):
 
 
 
-
-
-
-network_spec = [
-      dict(type='dense', size=32)
-    , dict(type='internal_lstm', size=32)
-]
-
-
 environment = PortCarnelian()
 
-agent = PPOAgent(
-    states = environment.states,
-    actions = environment.actions,
-    network = network_spec,
-
-)
-
-agent.restore_model(directory='saved')
-
-runner = Runner(agent=agent, environment=environment)
-
-def episode_finished(r):
-    print("Finished episode {ep} after {ts} timesteps (reward: {reward})".format(ep=r.episode, ts=r.episode_timestep,
-                                                                                 reward=r.episode_rewards[-1]))
-    print(runner.environment)
-    print("EPA: {}", r.episode_rewards[-1] / runner.environment._state.actions)
+def quantize(n):
+    return round(n / 15)
+    
+def double_probabilize(a):
+    a = np.exp(a[0]/temp) + np.exp(a[1]/temp)
+    return a/sum(a)
 
 
-    if r.episode % 100 == 0:
-        r.agent.save_model(directory="./saved/")
-    return True
+def probabilize(a):
+    a = np.exp(a/temp)
+    return a/sum(a)
+
+alpha = 0.8
+gamma = 0.9
+temp = 10
+
+q_table = np.load('q_table.npz')['arr_0']
+n = 0
+ep = 0
+cum_rew = 0
+cum_act = 0
+cum_100k_rew = 0
+cum_100k_act = 0
+cum_100k_max = 0
+cum_100k_min = 0
+while True:
+    environment.reset()
+    ep_rew = 0
+    ep += 1
+    while True:
+        state = environment.out_state()
+
+        pos_actions = q_table[state[0]-1, state[1]//5, \
+        quantize(state[2]), quantize(state[3]), math.ceil(state[4]/10)]
 
 
-runner.run(episodes=30000, max_episode_timesteps=280, episode_finished=episode_finished)
-runner.close()
+        probs = double_probabilize(pos_actions)
 
-# Print statistics
-print("Learning finished. Total episodes: {ep}. Average reward of last 100 episodes: {ar}.".format(
-    ep=runner.episode,
-    ar=np.mean(runner.episode_rewards[-100:]))
-)
+        while True:
+          action = np.random.choice(len(ACTIONS), p=probs)
+          if environment.is_action_available(action):
+              break
+          else:
+              pos_actions[0, action] = -5
+              pos_actions[1, action] = -5
+              probs[action] = 0
+              probs = probabilize(probs)
+
+
+        out_state, terminal, reward = environment.execute(action)
+
+        if reward > 0:
+            cum_rew += reward
+            cum_100k_rew += reward
+            ep_rew += reward
+            cum_100k_max = max(reward, cum_100k_max)
+            cum_100k_min = min(reward, cum_100k_min)
+        cum_act += 1
+        cum_100k_act += 1
+
+        state = environment.out_state()
+        pos_actions_new = q_table[state[0]-1, state[1]//5, \
+        quantize(state[2]), quantize(state[3]), math.ceil(state[4]/10)]
+    
+
+        if terminal:
+            reward = -2
+
+        dqchoice = random.randrange(2)
+        other = 1 - dqchoice
+        max_q = np.argmax(pos_actions_new[dqchoice])
+
+        pos_actions[dqchoice, action] = pos_actions[dqchoice, action] + alpha * ( reward + gamma * pos_actions_new[other, max_q] - pos_actions[dqchoice, action])
+
+        if terminal:
+            break
+
+        n += 1
+
+        if n % 1000 == 0:
+            print("Cum EPA {}, Actions {}, Cum 100k EPA {}, Actions {}".format(cum_rew/cum_act, cum_act, cum_100k_rew/cum_100k_act, cum_100k_act))
+            print("100k: EPA MAX {}, EPA MIN {}".format(cum_100k_max, cum_100k_min))
+            print("q_table max: {}", np.max(q_table))
+
+        if n % 50000 == 0:
+            print(environment)
+            print(pos_actions[0])
+            print(pos_actions[1])
+            
+        if n % 100000 == 0:
+            cum_100k_act = 0
+            cum_100k_rew = 0
+            cum_100k_max = 0
+            cum_100k_min = 0
+        
+    if ep % 100 == 0:
+        print("Ep {} F, EPA {}, Env {}".format(ep, ep_rew/environment._state.actions, environment))
+        
+
+    
